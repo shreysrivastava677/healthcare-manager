@@ -1,0 +1,245 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  PATIENT
+  DOCTOR
+  ADMIN
+}
+
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+}
+
+enum UrgencyLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum EmailType {
+  BOOKING_CONFIRM
+  REMINDER
+  CANCELLATION
+  LEAVE_NOTIFY
+  MED_REMINDER
+}
+
+enum EmailStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+// ─── Auth Models (NextAuth) ────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  name          String
+  email         String    @unique
+  emailVerified DateTime?
+  passwordHash  String?
+  phone         String?
+  role          Role      @default(PATIENT)
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts      Account[]
+  sessions      Session[]
+  doctorProfile DoctorProfile?
+  appointments  Appointment[]  @relation("PatientAppointments")
+  emailLogs     EmailLog[]
+  medicationReminders MedicationReminder[]
+
+  // Google Calendar tokens
+  googleAccessToken  String?
+  googleRefreshToken String?
+  googleTokenExpiry  DateTime?
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ─── Domain Models ─────────────────────────────────────────────
+
+model DoctorProfile {
+  id                  String   @id @default(cuid())
+  userId              String   @unique
+  specialisation      String
+  slotDurationMinutes Int      @default(30)
+  workingHours        String   @db.Text // JSON: { "mon": { "start": "09:00", "end": "17:00" }, ... }
+  isActive            Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  leaveDays    DoctorLeave[]
+  appointments Appointment[]
+}
+
+model DoctorLeave {
+  id              String   @id @default(cuid())
+  doctorProfileId String
+  leaveDate       DateTime @db.Date
+  reason          String?
+  createdAt       DateTime @default(now())
+
+  doctorProfile DoctorProfile @relation(fields: [doctorProfileId], references: [id], onDelete: Cascade)
+
+  @@unique([doctorProfileId, leaveDate])
+}
+
+model Appointment {
+  id              String            @id @default(cuid())
+  patientId       String
+  doctorProfileId String
+  slotStart       DateTime
+  slotEnd         DateTime
+  status          AppointmentStatus @default(PENDING)
+  holdToken       String?           @unique
+  holdExpiresAt   DateTime?
+  cancelReason    String?
+  googleEventIdPatient String?
+  googleEventIdDoctor  String?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  patient       User          @relation("PatientAppointments", fields: [patientId], references: [id])
+  doctorProfile DoctorProfile @relation(fields: [doctorProfileId], references: [id])
+
+  symptomForm     SymptomForm?
+  preVisitSummary PreVisitSummary?
+  postVisitNote   PostVisitNote?
+  postVisitSummary PostVisitSummary?
+
+  @@index([doctorProfileId, slotStart])
+  @@index([patientId])
+  @@index([status])
+  @@index([holdExpiresAt])
+}
+
+model SymptomForm {
+  id              String   @id @default(cuid())
+  appointmentId   String   @unique
+  symptoms        String   @db.Text
+  additionalNotes String?  @db.Text
+  submittedAt     DateTime @default(now())
+
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+}
+
+model PreVisitSummary {
+  id                 String       @id @default(cuid())
+  appointmentId      String       @unique
+  urgencyLevel       UrgencyLevel?
+  chiefComplaint     String?
+  suggestedQuestions String?      @db.Text // JSON array
+  rawLlmResponse     String?      @db.Text
+  retryCount         Int          @default(0)
+  generatedAt        DateTime?
+
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+}
+
+model PostVisitNote {
+  id            String   @id @default(cuid())
+  appointmentId String   @unique
+  clinicalNotes String   @db.Text
+  prescription  String   @db.Text
+  submittedAt   DateTime @default(now())
+
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+}
+
+model PostVisitSummary {
+  id                     String   @id @default(cuid())
+  appointmentId          String   @unique
+  patientFriendlySummary String?  @db.Text
+  medicationSchedule     String?  @db.Text // JSON array
+  followUpSteps          String?  @db.Text // JSON array
+  rawLlmResponse         String?  @db.Text
+  retryCount             Int      @default(0)
+  generatedAt            DateTime?
+
+  appointment          Appointment          @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  medicationReminders  MedicationReminder[]
+}
+
+model MedicationReminder {
+  id                String   @id @default(cuid())
+  postVisitSummaryId String
+  patientId         String
+  medicationName    String
+  dosage            String
+  frequency         String
+  startDate         DateTime @db.Date
+  endDate           DateTime @db.Date
+  nextReminderAt    DateTime?
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
+
+  postVisitSummary PostVisitSummary @relation(fields: [postVisitSummaryId], references: [id], onDelete: Cascade)
+  patient          User             @relation(fields: [patientId], references: [id])
+
+  @@index([nextReminderAt, isActive])
+}
+
+model EmailLog {
+  id           String      @id @default(cuid())
+  userId       String?
+  toEmail      String
+  subject      String
+  body         String      @db.Text
+  type         EmailType
+  status       EmailStatus @default(PENDING)
+  retryCount   Int         @default(0)
+  errorMessage String?     @db.Text
+  sentAt       DateTime?
+  createdAt    DateTime    @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([status, retryCount])
+}
